@@ -549,6 +549,7 @@ function load(){
   // import data saved by earlier builds, if any
 }
 function save(){
+  _dv++;
   try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){toast("Could not save — storage full?")}
 }
 const snapObj=()=>{const o={};["tx","budgets","recurring","nextId","accounts","assets","debts","goals","transfers","nwHist","plan","sources","alertCfg","templates","catIcons","catColors","customCats"].forEach(k=>o[k]=S[k]);return o};
@@ -581,7 +582,8 @@ function previousRange(p){
   return[null,null];
 }
 const inRange=(r,s,e)=>(!s||r.date>=s)&&(!e||r.date<=e);
-const fetchTx=(s,e)=>S.tx.filter(r=>inRange(r,s,e)).sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
+const cmpD=(x,y)=>x<y?-1:x>y?1:0;   /* ISO dates: plain compare == localeCompare, ~20x faster */
+const fetchTx=(s,e)=>S.tx.filter(r=>inRange(r,s,e)).sort((a,b)=>(a.date<b.date?1:a.date>b.date?-1:0)||b.id-a.id);
 function totals(rows){let i=0,e=0;rows.forEach(r=>r.kind==="Income"?i+=r.amount:e+=r.amount);return[i,e]}
 function catTotals(rows,kind="Expense"){const o={};rows.forEach(r=>{if(r.kind===kind){const c=r.category||"Other";o[c]=(o[c]||0)+r.amount}});return o}
 const sorted=o=>Object.entries(o).sort((a,b)=>b[1]-a[1]);
@@ -641,10 +643,12 @@ function categoriesFor(kind){
   [...categoryUsage(kind),...def,...customOf(kind),...allCategories()].forEach(c=>{if(c&&!out.includes(c))out.push(c)});return out;
 }
 function allCategories(){const ex=[...new Set(S.tx.map(r=>r.category).filter(Boolean))].filter(c=>!CATEGORIES.includes(c)).sort((a,b)=>a.localeCompare(b));return[...new Set([...CATEGORIES,...ex,...(S.customCats||[]).map(c=>c.name)])]}
+let _dv=0,_nhC=null,_nhV=-1,_nhL=-1;   /* _dv: bumped by save(); noteHints is recomputed only when data actually changed */
 function noteHints(){
-  const h={};[...S.tx].sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id).forEach(r=>{
+  if(_nhC&&_nhV===_dv&&_nhL===S.tx.length)return _nhC;
+  const h={};[...S.tx].sort((a,b)=>cmpD(b.date,a.date)||b.id-a.id).forEach(r=>{
     const k=(r.note||"").trim().toLowerCase();if(k&&!h[k]&&k!=="recurring")h[k]={note:r.note.trim(),kind:r.kind,category:r.category||"Other",amount:r.amount}
-  });return h;
+  });_nhC=h;_nhV=_dv;_nhL=S.tx.length;return h;
 }
 /* ============================ helpers ============================ */
 const $=id=>document.getElementById(id),esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -760,11 +764,33 @@ function renderTx(){
   const q=ui.q.trim().toLowerCase();if(q)rows=rows.filter(r=>`${r.note||""} ${r.category||""} ${r.amount} ${r.date} ${(r.tags||[]).join(" ")}`.toLowerCase().includes(q));
   const[i,x]=totals(rows);$("txSum").textContent=`${rows.length} transactions · +${short(i)} / −${short(x)} · net ${short(i-x)}`;
   if(!rows.length){$("txList").innerHTML=`<div class="empty">Nothing here yet.<br>Type an amount below and press Add.</div>`;return}
-  let html="",last="";
   const byDay={};rows.forEach(r=>{(byDay[r.date]||(byDay[r.date]=[])).push(r)});
-  Object.keys(byDay).sort().reverse().forEach(d=>{const[di,dx]=totals(byDay[d]);html+=`<div class="day"><span>${dayLabel(d)}</span><span>${dx?"−"+short(dx):""} ${di?"+"+short(di):""}</span></div>`+byDay[d].map(r=>txRow(r)).join("")});
+  const days=Object.keys(byDay).sort().reverse();
+  const dayHtml=d=>{const[di,dx]=totals(byDay[d]);return`<div class="day"><span>${dayLabel(d)}</span><span>${dx?"−"+short(dx):""} ${di?"+"+short(di):""}</span></div>`+byDay[d].map(r=>txRow(r)).join("")};
+  /* Only the first screens are built up front; the rest is appended (whole days) as you scroll. Identical markup, far fewer DOM nodes. */
+  const sig=[ui.tPeriod,ui.fKind,ui.fCat,ui.fTag,q].join("\u0001");if(sig!==ui.txSig){ui.txSig=sig;ui.txLim=0}
+  TXC.days=days;TXC.i=0;TXC.fn=dayHtml;TXC.cnt={};days.forEach(d=>TXC.cnt[d]=byDay[d].length);
+  const canIO=typeof IntersectionObserver==="function",want=Math.max(ui.txLim||0,TX_CHUNK);let n=0,html="";
+  while(TXC.i<days.length&&(!canIO||n<want)){const d=days[TXC.i++];html+=dayHtml(d);n+=TXC.cnt[d]}
+  ui.txLim=n;
+  if(TXC.i<days.length)html+='<div id="txMore" style="height:1px"></div>';
+  if(TXC.io)TXC.io.disconnect();
   $("txList").innerHTML=html;
+  if(TXC.i<days.length){
+    if(!TXC.io)TXC.io=new IntersectionObserver(es=>{if(es.some(e=>e.isIntersecting))txLoadMore()},{root:document.querySelector("main"),rootMargin:"1000px 0px"});
+    TXC.io.observe($("txMore"));
+  }
   $("selbar").classList.toggle("on",ui.sel.size>0);$("selCount").textContent=ui.sel.size+" selected";
+}
+const TX_CHUNK=60,TXC={days:null,i:0,fn:null,cnt:null,io:null};
+function txLoadMore(){
+  const s=document.getElementById("txMore");if(!s||!TXC.days)return;
+  let n=0,h="";
+  while(TXC.i<TXC.days.length&&n<TX_CHUNK){const d=TXC.days[TXC.i++];h+=TXC.fn(d);n+=TXC.cnt[d]}
+  ui.txLim=(ui.txLim||0)+n;
+  if(h)s.insertAdjacentHTML("beforebegin",h);
+  if(TXC.i>=TXC.days.length){s.remove();TXC.io&&TXC.io.disconnect()}
+  else if(TXC.io){TXC.io.unobserve(s);TXC.io.observe(s)}   /* re-arm: fires again if the sentinel is still near the viewport */
 }
 function renderStatsOverview(){
   pills($("stPeriod"),ui.sPeriod,v=>{ui.sPeriod=v;renderStats()});
@@ -793,19 +819,30 @@ function renderSet(){
   $("cur").value=S.currency;$("alWarn").value=String((S.alertCfg&&S.alertCfg.warn)||80);renderPrefs();
   $("bkInfo").textContent=S.snap?`Last auto-snapshot ${new Date(S.snap.at).toLocaleString()}`:"No snapshot yet";
 }
-function refreshAll(){recordNW();renderDash();renderAlerts();renderRepBanner();renderHome();renderTx();renderStats();renderBud();renderSet();rebuildQuick();if(ui.tab==="dash")renderNWCard();if(ui.tab==="wealth")renderWealth();if(ui.tab==="debts")renderDebts();if(ui.tab==="plan")renderPlan();window.countUps&&countUps()}
+/* Only the visible tab is rebuilt. Hidden tabs are rebuilt the moment you open them (showTab -> refreshAll),
+   so what you see is always current; we just stop doing 6 invisible screens' worth of work on every change. */
+const TAB_RENDER={
+  dash:()=>{renderDash();renderAlerts();renderRepBanner();renderHome();renderNWCard()},
+  tx:()=>renderTx(),stats:()=>renderStats(),plan:()=>{renderBud();renderPlan()},
+  set:()=>renderSet(),wealth:()=>renderWealth(),debts:()=>renderDebts()
+};
+function refreshAll(){
+  _wOn=true;_wC=null;
+  try{recordNW();const f=TAB_RENDER[ui.tab];if(f)f();rebuildQuick();if(ui.tab==="dash"&&window.countUps)countUps()}
+  finally{_wOn=false;_wC=null}
+}
 function showTab(t){
   ui.tab=t;document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on",x.id==="t-"+t));
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.t===t));
-  $("qa").style.display=(t==="set"||t==="debts")?"none":"";if(t!=="tx")clearSel();$("main")?.scrollTo?.(0,0);document.querySelector("main").scrollTop=0;refreshAll();
+  $("qa").style.display=(t==="set"||t==="debts")?"none":"";if(t!=="tx")clearSel();else ui.txLim=0;$("main")?.scrollTo?.(0,0);document.querySelector("main").scrollTop=0;refreshAll();
 }
 
 /* ============================ Quick add ============================ */
 function rebuildQuick(){
   const cats=categoriesFor(ui.qKind);if(!ui.touchedCat||!cats.includes(ui.qCat))ui.qCat=cats[0]||"Other";
   const qa=$("qAcct"),cur=qa.value;qa.style.display=S.accounts.length?"":"none";qa.innerHTML=`<option value="">No account</option>`+S.accounts.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join("");qa.value=S.accounts.some(a=>String(a.id)===cur)?cur:(S.accounts.some(a=>a.id===S.lastAcct)?S.lastAcct:"");
-  $("qChips").innerHTML=cats.slice(0,10).map(c=>`<button class="chip ${c===ui.qCat?"on":""}" data-c="${esc(c)}"><i class="ci">${pf("icons")?esc(catEmoji(c)):""}</i>${esc(c)}</button>`).join("");
   $("noteList").innerHTML=Object.values(noteHints()).slice(0,80).map(h=>`<option value="${esc(h.note)}">`).join("");
+  $("qChips").innerHTML=cats.slice(0,10).map(c=>`<button class="chip ${c===ui.qCat?"on":""}" data-c="${esc(c)}"><i class="ci">${pf("icons")?esc(catEmoji(c)):""}</i>${esc(c)}</button>`).join("");
   document.querySelectorAll("#qKind button").forEach(b=>{const on=b.dataset.k===ui.qKind;b.classList.toggle("on",on)});
   const d=$("qDate");d.classList.toggle("off",d.value&&d.value!==today());fillQSrc();
 }
@@ -908,7 +945,7 @@ async function download(name,text,type){
 }
 const csvCell=v=>{v=String(v??"");return/[",\n]/.test(v)?`"${v.replace(/"/g,'""')}"`:v};
 function exportCsv(){
-  const rows=[...S.tx].sort((a,b)=>a.date.localeCompare(b.date)||a.id-b.id);
+  const rows=[...S.tx].sort((a,b)=>cmpD(a.date,b.date)||a.id-b.id);
   const out=["ID,Type,Amount,Category,Date,Note,Tags,Source",...rows.map(r=>[r.id,r.kind,r.amount,r.category||"Other",r.date,r.note||"",(r.tags||[]).join(" "),r.src?srcNameById(r.src):""].map(csvCell).join(","))].join("\r\n");
   download(`mywallet_${today()}.csv`,"\ufeff"+out,"text/csv");toast("CSV exported");
 }
@@ -964,7 +1001,9 @@ const addMonths=(n)=>{const d=new Date();d.setMonth(d.getMonth()+n);return d.toL
 
 function acctBalance(a){let b=+a.opening||0;S.tx.forEach(r=>{if(r.acct===a.id)b+=r.kind==="Income"?r.amount:-r.amount});S.transfers.forEach(t=>{if(t.from===a.id)b-=t.amount;if(t.to===a.id)b+=t.amount});S.debts.forEach(d=>(d.hist||[]).forEach(m=>{if(m.cash&&m.acct===a.id)b+=dCash(d,m)}));return b}
 function unassignedBal(){let b=0;S.tx.forEach(r=>{if(!r.acct||!S.accounts.some(a=>a.id===r.acct))b+=r.kind==="Income"?r.amount:-r.amount});S.debts.forEach(d=>(d.hist||[]).forEach(m=>{if(m.cash&&(!m.acct||!S.accounts.some(a=>a.id===m.acct)))b+=dCash(d,m)}));return b}
+let _wOn=false,_wC=null;   /* wealth() is memoised only while refreshAll() runs (data cannot change mid-pass) */
 function wealth(){
+  if(_wOn&&_wC)return _wC;
   const accs=S.accounts.map(a=>({a,b:acctBalance(a)})),un=unassignedBal();
   const liquid=accs.filter(x=>LIQUID.includes(x.a.type)).reduce((s,x)=>s+x.b,0)+un;
   const invAcc=accs.filter(x=>!LIQUID.includes(x.a.type)).reduce((s,x)=>s+x.b,0);
@@ -972,7 +1011,9 @@ function wealth(){
   const owed=S.debts.filter(d=>d.dir==="owed").reduce((s,d)=>s+d.balance,0);
   const owe=S.debts.filter(d=>d.dir!=="owed").reduce((s,d)=>s+d.balance,0);
   const totalAssets=liquid+invAcc+assets+owed;
-  return{accs,un,liquid,invAcc,assets,owed,owe,totalAssets,net:totalAssets-owe};
+  const res={accs,un,liquid,invAcc,assets,owed,owe,totalAssets,net:totalAssets-owe};
+  if(_wOn)_wC=res;
+  return res;
 }
 function recordNW(){
   if(!(S.tx.length||S.accounts.length||S.assets.length||S.debts.length))return;
@@ -1510,7 +1551,7 @@ function scheduled(s,e){
   });
   S.debts.filter(d=>d.dir!=="owed"&&d.balance>0&&d.due&&!(d.day&&d.payment)&&d.due>=s&&d.due<=e&&d.due>=td).forEach(d=>out.push({date:d.due,name:"Payment: "+d.name,amt:d.balance,kind:"Expense"}));
   S.goals.filter(g=>g.deadline&&g.deadline>=s&&g.deadline<=e&&g.deadline>=td).forEach(g=>out.push({date:g.deadline,name:"Goal due: "+g.name,amt:Math.max(g.target-g.saved,0),kind:"Goal"}));
-  return out.sort((a,b)=>a.date.localeCompare(b.date));
+  return out.sort((a,b)=>cmpD(a.date,b.date));
 }
 function upcoming(days=30){return scheduled(today(),addDaysISO(today(),days))}
 
@@ -1526,7 +1567,7 @@ function monthEndForecast(){
     const d=Math.min(s.day||dim,dim);
     if(d>dom)items.push({date:`${y}-${pad(m+1)}-${pad(d)}`,name:s.name,amt:s.expected,kind:"Income",src:true});else late.push(s);
   });
-  items.sort((a,b)=>a.date.localeCompare(b.date));
+  items.sort((a,b)=>cmpD(a.date,b.date));
   const sig=new Set(S.recurring.map(r=>[r.amount,r.category,r.note||"Recurring"].join("|")));
   const lim=addDaysISO(td,-59),vr=S.tx.filter(r=>r.kind==="Expense"&&r.date>=lim&&r.date<=td&&!r.rec&&r.category!=="Debt payment"&&!sig.has([r.amount,r.category,r.note||"Recurring"].join("|")));
   const first=S.tx.reduce((a,r)=>r.date<a?r.date:a,td),dataDays=daysBetween(first,td)+1,span=Math.max(1,Math.min(60,dataDays));
@@ -1643,7 +1684,7 @@ function detectSubs(){
   S.tx.filter(r=>r.kind==="Expense"&&r.note&&!r.rec).forEach(r=>{const k=r.note.trim().toLowerCase();(g[k]||(g[k]=[])).push(r)});
   const out=[];
   Object.entries(g).forEach(([k,a])=>{
-    if(a.length<3||known.has(k))return;a.sort((x,y)=>x.date.localeCompare(y.date));
+    if(a.length<3||known.has(k))return;a.sort((x,y)=>cmpD(x.date,y.date));
     const md=median(a.map(x=>x.amount));if(!md||a.some(x=>Math.abs(x.amount-md)>md*.15))return;
     const gaps=[];for(let i=1;i<a.length;i++)gaps.push(daysBetween(a[i-1].date,a[i].date));const mg=median(gaps);
     const freq=mg>=26&&mg<=35?"monthly":mg>=6&&mg<=8?"weekly":mg>=85&&mg<=95?"quarterly":mg>=355&&mg<=375?"yearly":null;if(!freq)return;
@@ -2025,7 +2066,7 @@ function budHtml(){
   return`<div class="row-b"><h3>الميزانيات</h3><button class="mini" data-x="go" data-v="plan:bud">الكل</button></div>`+it.map(([c,v,b])=>{const p=v/b;return`<div style="margin:11px 0"><div class="row-b"><b style="color:var(--strong)"><span class="ci">${esc(catGlyph(c))}</span>${esc(c)}</b><span style="color:${p>1?"var(--red)":"var(--muted)"}">${short(v)} / ${short(b)}</span></div><div class="bar"><i class="${p>1?"over":p>.8?"warn":""}" style="width:${Math.min(100,p*100)}%"></i></div></div>`}).join("");
 }
 function recentHtml(){
-  const rows=[...S.tx].sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id).slice(0,6);if(!rows.length)return"";
+  const rows=[...S.tx].sort((a,b)=>cmpD(b.date,a.date)||b.id-a.id).slice(0,6);if(!rows.length)return"";
   return`<div class="row-b"><h3>آخر المعاملات</h3><button class="mini" data-go="tx">عرض الكل</button></div>`+rows.map(r=>txRow(r)).join("");
 }
 function goalsHtml(){
@@ -2162,7 +2203,7 @@ function bind(){
   document.addEventListener("click",e=>{const g=e.target.closest("[data-go]");if(g)showTab(g.dataset.go)});
   $("nav").onclick=e=>{const b=e.target.closest("button");if(b)showTab(b.dataset.t)};
   $("btnTheme").onclick=()=>{const cur=document.documentElement.dataset.theme;S.theme=cur==="dark"?"light":"dark";save();applyTheme()};
-  $("q").oninput=e=>{ui.q=e.target.value;renderTx()};
+  let _qT;$("q").oninput=e=>{ui.q=e.target.value;clearTimeout(_qT);_qT=setTimeout(renderTx,140)};
   $("fKind").onchange=e=>{ui.fKind=e.target.value;renderTx()};$("fCat").onchange=e=>{ui.fCat=e.target.value;renderTx()};
   $("dSplit").onclick=e=>{const b=e.target.closest("button");if(!b)return;ui.dSplit=b.dataset.k;document.querySelectorAll("#dSplit button").forEach(x=>x.classList.toggle("on",x===b));renderDash()};
   $("stSplit").onclick=e=>{const b=e.target.closest("button");if(!b)return;ui.sSplit=b.dataset.k;document.querySelectorAll("#stSplit button").forEach(x=>x.classList.toggle("on",x===b));renderStats()};
@@ -2193,7 +2234,12 @@ function bind(){
   history.replaceState({},"");window.addEventListener("popstate",()=>{if($("sheetBg").classList.contains("on"))closeSheet();else if(ui.sel.size){clearSel();renderTx()}});
   if(window.Capacitor&&Capacitor.Plugins&&Capacitor.Plugins.App){Capacitor.Plugins.App.addListener("backButton",()=>{if(lockState.locked){Capacitor.Plugins.App.exitApp();return}if($("sheetBg").classList.contains("on"))closeSheet();else if(ui.sel.size){clearSel();renderTx()}else if(ui.tab!=="dash")showTab("dash");else Capacitor.Plugins.App.exitApp()})}
 }
-function toggleSel(id){ui.sel.has(id)?ui.sel.delete(id):ui.sel.add(id);renderTx()}
+function toggleSel(id){
+  ui.sel.has(id)?ui.sel.delete(id):ui.sel.add(id);
+  const el=ui.histView==="cal"?null:document.querySelector(`#txList .tx[data-id="${id}"]`);
+  if(el){el.classList.toggle("sel",ui.sel.has(id));$("selbar").classList.toggle("on",ui.sel.size>0);$("selCount").textContent=ui.sel.size+" selected"}   /* patch one row instead of rebuilding the whole list */
+  else renderTx();
+}
 
 /* ============================ App lock (fingerprint) ============================ */
 const BIO=(()=>{try{const C=window.Capacitor;if(!C)return null;return(C.Plugins&&C.Plugins.BiometricLock)||(C.registerPlugin?C.registerPlugin("BiometricLock"):null)}catch(_){return null}})();
@@ -2272,7 +2318,11 @@ const made=applyRecurring();autoSnapshot();refreshAll();applyPrefs();if(pf("star
 if(made)toast(`${made} recurring transaction(s) added`);
 setTimeout(launchAlerts,made?6500:800);
 if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();
-if("serviceWorker"in navigator&&location.protocol.startsWith("http"))navigator.serviceWorker.register("sw.js").catch(()=>{});
+if("serviceWorker"in navigator&&location.protocol.startsWith("http")){
+  /* Inside the Android app every file is already bundled: a service worker only adds a start-up hop and cache writes. Remove it there; keep it for the installable web version. */
+  if(window.Capacitor&&(Capacitor.isNativePlatform?Capacitor.isNativePlatform():true)){navigator.serviceWorker.getRegistrations().then(r=>r.forEach(x=>x.unregister())).catch(()=>{});try{caches.keys().then(k=>Promise.all(k.filter(x=>x.indexOf("mywallet-")===0).map(x=>caches.delete(x))))}catch(e){}}
+  else navigator.serviceWorker.register("sw.js").catch(()=>{});
+}
 /* ===================== UX PRO: أصوات + تأثيرات ===================== */
 const SFX=(()=>{
   let ctx=null,master=null,last=0,lastPri=0;
@@ -2322,6 +2372,7 @@ const SFX=(()=>{
   }
   // فتح السياق بأول لمسة (سياسة المتصفحات)
   ["pointerdown","keydown","touchstart"].forEach(ev=>addEventListener(ev,()=>{if(on())init()},{once:true,passive:true}));
+  (window.requestIdleCallback||setTimeout)(()=>{try{if(on()&&!ctx)init()}catch(e){}},{timeout:4000});   /* build the AudioContext while idle, not during the first tap */
   return{play,init};
 })();
 
@@ -2377,9 +2428,6 @@ const FX=(()=>{
     if(t.classList&&t.classList.contains("sw"))SFX.play(t.checked?"toggleOn":"toggleOff");
     else if(t.tagName==="SELECT")SFX.play("select");
   },true);
-  // لمسة خفيفة في أعلى الشاشة تحرك الإضاءة تلقائياً مع التمرير
-  const m=document.querySelector("main");
-  if(m)m.addEventListener("scroll",()=>{document.documentElement.style.setProperty("--scroll",m.scrollTop)},{passive:true});
   // ربط الدوال الأساسية: تنقل · نوافذ · تنبيهات
   const wrap=(name,fn)=>{const o=window[name];if(typeof o!=="function")return;window[name]=function(...a){const r=o.apply(this,a);try{fn(...a)}catch(e){}return r}};
   wrap("showTab",()=>SFX.play("nav"));

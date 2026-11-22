@@ -521,8 +521,18 @@ const R=[
 [/^Received (.+) of (.+)$/,m=>`استلمتَ ${m[1]} من ${m[2]}`],
 [/^Due (.+)$/,m=>"الاستحقاق "+m[1]]
 ];
+/* tr() is a pure function that used to run ~40 regexes on EVERY text node (every number, every note) on every render.
+   Dictionary hit -> instant; no Latin letters (numbers, symbols, Arabic) -> nothing can match; everything else is memoised. */
+const TC=new Map(),HAS_LAT=/[A-Za-z]/;
 function tr(s){
   if(D[s]!==undefined)return D[s];
+  if(typeof s!=="string"||!HAS_LAT.test(s))return s;
+  const c=TC.get(s);if(c!==undefined)return c;
+  const r=tr0(s);
+  if(TC.size>6000)TC.clear();
+  TC.set(s,r);return r;
+}
+function tr0(s){
   for(const[re,f]of R){const m=re.exec(s);if(m)return f(m)}
   let m=/^([⚠✓✕•★↻＋+−\s]+)(.+)$/.exec(s);if(m&&m[2]!==s){const r=tr(m[2]);if(r!==m[2])return m[1]+r}
   if(s.includes(" · ")){const p=s.split(" · "),q=p.map(tr);if(q.some((x,i)=>x!==p[i]))return q.join(" · ")}
