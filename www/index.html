@@ -392,6 +392,35 @@ nav button.on::after{box-shadow:0 0 10px rgba(var(--arg),.9);background:linear-g
 
 .pill-row{padding:6px 6px 16px;margin:-6px -6px -6px}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+/* =====================================================================
+   PERF — تخفيف الكلفة الرسومية (نفس الشكل تقريباً بجهد أقل على المعالج)
+   ===================================================================== */
+/* خلفية ثابتة مركّبة بدل background-attachment:fixed (كانت تُعاد رسمها مع كل تمرير) */
+body,html[data-theme=dark] body{background:var(--bg)!important;background-attachment:scroll!important}
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:radial-gradient(900px 480px at 105% -8%,rgba(var(--arg),.20),transparent 62%),radial-gradient(760px 460px at -12% 108%,rgba(139,92,246,.16),transparent 60%)}
+html[data-theme=dark] body::before{background:radial-gradient(900px 500px at 105% -8%,rgba(var(--arg),.22),transparent 60%),radial-gradient(800px 480px at -12% 108%,rgba(139,92,246,.20),transparent 60%)}
+/* إزالة التمويه الزجاجي (أثقل عنصر على WebView) واستبداله بخلفيات شبه معتمة */
+nav,.qa,.toast,.sheet-bg,header button,.hero .kpi{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+nav,.qa{background:color-mix(in srgb,var(--panel) 97%,transparent)}
+.sheet-bg{background:rgba(4,8,22,.68)}
+.toast{background:linear-gradient(135deg,#101a3a,#1e1446)}
+/* انتقال الشاشات: بلا فلتر ضبابية */
+@keyframes tabIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.tab.on{animation-duration:.28s}
+/* لا حركات لا نهائية على عناصر كثيرة */
+header::after{animation:sheen 7s var(--ease) 1.2s 1}
+.hero .big{animation:none;background-position:0 0}
+.bar>i{animation:grow .8s var(--ease) both;background-image:none}
+.hero::after{will-change:transform}
+/* ظلال أصغر (كانت بقطر كبير على كل بطاقة) */
+.card{box-shadow:0 8px 18px -12px rgba(var(--arg),.28)}
+html[data-theme=dark] .card{box-shadow:0 8px 18px -12px rgba(0,0,0,.65)}
+.hero{box-shadow:0 12px 26px -16px rgba(var(--arg),.55),inset 0 1px 0 rgba(255,255,255,.5)}
+.sheet{box-shadow:0 -12px 30px -16px rgba(var(--arg),.5),inset 0 1px 0 rgba(255,255,255,.12)}
+nav button.on svg{filter:none}
+.sheet .field,.sheet .pill-row,.sheet .btns{animation-duration:.35s}
 </style>
 </head>
 <body>
